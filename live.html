@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Open Bus Stride - Live Map</title>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+     integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+     crossorigin=""/>
+     
+    <style>
+        body { margin: 0; padding: 0; font-family: sans-serif; }
+        #map { height: 100vh; width: 100%; }
+        
+        #controls {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.2);
+            max-width: 300px;
+        }
+        
+        h1 { font-size: 18px; margin: 0 0 10px 0; }
+        
+        .stat-item { margin-bottom: 5px; font-size: 14px; }
+        .loading { color: #d35400; font-weight: bold; }
+        .success { color: #27ae60; font-weight: bold; }
+        .error { color: #c0392b; font-weight: bold; }
+        
+        button {
+            background-color: #0078A8;
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 10px;
+            width: 100%;
+            font-size: 14px;
+        }
+        button:hover { background-color: #006080; }
+
+        /* Legend for bus direction arrows */
+        .bus-marker {
+            font-size: 16px;
+            text-align: center;
+            line-height: 16px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="controls">
+        <h1>🇮🇱 Live Bus Map</h1>
+        <div class="stat-item">Status: <span id="status">Waiting...</span></div>
+        <div class="stat-item">Active Buses: <span id="bus-count">0</span></div>
+        <div class="stat-item">Last Update: <span id="last-update">-</span></div>
+        <button onclick="fetchBuses()">Refresh Now</button>
+        <p style="font-size: 11px; color: #666; margin-top: 10px;">
+            Data source: Open Bus Stride API (Hasadna).<br>
+            Showing buses recorded in the last 10 minutes.
+        </p>
+    </div>
+
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+     integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+     crossorigin=""></script>
+
+    <script>
+        // 1. Initialize Map centered on Israel
+        const map = L.map('map').setView([31.4117, 35.0818], 8);
+
+        // Add OpenStreetMap tiles
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+        }).addTo(map);
+
+        // Layer group for bus markers to allow easy clearing
+        const busLayer = L.layerGroup().addTo(map);
+
+        // 2. Configuration
+        // We fetch up to 5000 results to cover most active buses. 
+        // The API supports limit up to 500,000 but 5000 is safer for browser performance.
+        const API_URL = "https://open-bus-stride-api.hasadna.org.il/siri_vehicle_locations/list";
+        const FETCH_LIMIT = 5000;
+        const TIME_WINDOW_MINUTES = 10;
+
+        // 3. Fetch Data Function
+        async function fetchBuses() {
+            const statusEl = document.getElementById('status');
+            const countEl = document.getElementById('bus-count');
+            const updateEl = document.getElementById('last-update');
+
+            statusEl.innerText = "Fetching data...";
+            statusEl.className = "loading";
+
+            // Calculate time window: Current time minus X minutes
+            const now = new Date();
+            const timeFrom = new Date(now.getTime() - TIME_WINDOW_MINUTES * 60 * 1000).toISOString();
+
+            // Construct URL parameters
+            const params = new URLSearchParams({
+                limit: FETCH_LIMIT,
+                recorded_at_time_from: timeFrom,
+                order_by: "recorded_at_time desc" // Get freshest data first
+            });
+
+            try {
+                const response = await fetch(`${API_URL}?${params.toString()}`);
+                
+                if (!response.ok) {
+                    throw new Error(`API Error: ${response.status}`);
+                }
+
+                const data = await response.json();
+                
+                // Clear old markers
+                busLayer.clearLayers();
+
+                let validCount = 0;
+
+                data.forEach(bus => {
+                    // Validate coordinates
+                    if (bus.lat && bus.lon) {
+                        
+                        // Create Popup Content
+                        // Note: Line numbers (e.g. "Line 5") are usually in a joined table (siri_routes),
+                        // not directly in the vehicle_location stream. We display what is available.
+                        const popupContent = `
+                            <b>Vehicle Ref:</b> ${bus.vehicle_ref || 'N/A'}<br>
+                            <b>Recorded:</b> ${new Date(bus.recorded_at_time).toLocaleTimeString()}<br>
+                            <b>Bearing:</b> ${bus.bearing || 'N/A'}°<br>
+                            <b>Velocity:</b> ${bus.velocity || '0'} km/h<br>
+                            <small>Ride ID: ${bus.siri_ride_id}</small>
+                        `;
+
+                        // Create Marker
+                        // We use circle markers for better performance with thousands of points
+                        const marker = L.circleMarker([bus.lat, bus.lon], {
+                            radius: 5,
+                            fillColor: "#0078A8",
+                            color: "#fff",
+                            weight: 1,
+                            opacity: 1,
+                            fillOpacity: 0.8
+                        });
+
+                        marker.bindPopup(popupContent);
+                        busLayer.addLayer(marker);
+                        validCount++;
+                    }
+                });
+
+                // Update UI
+                statusEl.innerText = "Live";
+                statusEl.className = "success";
+                countEl.innerText = validCount;
+                updateEl.innerText = now.toLocaleTimeString();
+
+            } catch (error) {
+                console.error("Fetch error:", error);
+                statusEl.innerText = "Error";
+                statusEl.className = "error";
+                alert("Failed to load bus data. Check console for details.");
+            }
+        }
+
+        // 4. Initial Load and Interval
+        fetchBuses();
+        
+        // Auto-refresh every 60 seconds
+        setInterval(fetchBuses, 60000);
+
+    </script>
+</body>
+</html>
