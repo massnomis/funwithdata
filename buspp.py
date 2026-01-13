@@ -15,7 +15,7 @@ import pytz
 
 from datetime import datetime, timezone
 
-import matplotlib.pyplot as plt
+
 
 # --- Configuration ---
 API_BASE_URL = "https://open-bus-stride-api.hasadna.org.il"
