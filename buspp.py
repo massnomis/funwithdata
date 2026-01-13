@@ -7,15 +7,10 @@ import pydeck as pdk
 from datetime import datetime, timedelta, timezone
 import math
 import json
-import time  # Added for timing
+import time
 import random
-import os  # Added for file operations
+import os
 import pytz
-
-
-from datetime import datetime, timezone
-
-
 
 # --- Configuration ---
 API_BASE_URL = "https://open-bus-stride-api.hasadna.org.il"
@@ -32,20 +27,21 @@ st.markdown("""
     """,
             unsafe_allow_html=True)
 
-
-# --- Network Helper ---
+# --- Helper Functions ---
 def get_session():
     """Creates a requests session with retry logic and longer timeouts."""
     session = requests.Session()
-    retry = Retry(total=3,
-                  backoff_factor=1,
-                  status_forcelist=[500, 502, 503, 504],
-                  allowed_methods=["GET"])
-    adapter = HTTPAdapter(max_retries=retry)
+    retry = Retry(
+        total=5,
+        backoff_factor=1,
+        status_forcelist=[500, 502, 503, 504, 429],
+        allowed_methods=["GET"],
+        respect_retry_after_header=True
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_maxsize=100)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     return session
-
 
 def fetch_api(endpoint, params=None):
     """Safe API fetcher with centralized debug handling."""
@@ -53,6 +49,9 @@ def fetch_api(endpoint, params=None):
     if params is None:
         params = {}
 
+    # Remove None values
+    params = {k: v for k, v in params.items() if v is not None}
+    
     # --- DEBUG: Show Request ---
     if st.session_state.get('debug_mode'):
         with st.expander(f"📤 REQ: {endpoint}", expanded=False):
@@ -64,14 +63,19 @@ def fetch_api(endpoint, params=None):
                           params=params,
                           timeout=120)
         res.raise_for_status()
-        data = res.json()
+        
+        # Check if response is valid JSON
+        try:
+            data = res.json()
+        except json.JSONDecodeError:
+            st.error(f"❌ Invalid JSON response from {endpoint}")
+            return []
 
         # --- DEBUG: Show Response ---
         if st.session_state.get('debug_mode'):
             with st.expander(
                     f"📥 RES: {endpoint} (Count: {len(data) if isinstance(data, list) else 1})",
                     expanded=False):
-                # Show first 5 items to keep it readable, unless it's small
                 preview = data[:5] if isinstance(
                     data, list) and len(data) > 5 else data
                 st.write(
@@ -85,13 +89,20 @@ def fetch_api(endpoint, params=None):
             f"⏱️ API Timeout ({endpoint}): The server is slow. Try reducing the radius or lookback."
         )
         return []
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 422:
+            st.error(f"❌ Validation Error ({endpoint}): Check your parameters")
+            try:
+                error_details = e.response.json()
+                st.error(f"Details: {error_details}")
+            except:
+                pass
+        else:
+            st.error(f"❌ HTTP Error ({endpoint}): {e}")
+        return []
     except Exception as e:
         st.error(f"❌ API Error ({endpoint}): {e}")
         return []
-
-
-# --- Helper Functions ---
-
 
 def get_distinct_color(index):
     """Returns a bright, distinct color based on an index."""
@@ -107,7 +118,6 @@ def get_distinct_color(index):
     ]
     return colors[index % len(colors)]
 
-
 def haversine_bbox(lat, lon, radius_km):
     """Calculates a rough bounding box (min_lat, min_lon, max_lat, max_lon) given a center and radius."""
     lat_change = radius_km / 111.0
@@ -119,109 +129,89 @@ def haversine_bbox(lat, lon, radius_km):
         "max_lon": lon + lon_change
     }
 
-
 def get_bearing_icon(bearing):
     """Converts a degree bearing to an emoji arrow and cardinal direction."""
     if pd.isna(bearing): return "❓ Unknown"
     try:
         b = int(bearing)
         if b >= 337 or b < 23: return "⬆️ N"
-        # https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2b06.png
         if 23 <= b < 67: return "↗️ NE"
-        # https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2197.png
         if 67 <= b < 112: return "➡️ E"
-        # https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/27a1.png
         if 112 <= b < 157: return "↘️ SE"
-        # https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2198.png
         if 157 <= b < 202: return "⬇️ S"
-        # https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2b07.png
         if 202 <= b < 247: return "↙️ SW"
-        # https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2199.png
         if 247 <= b < 292: return "⬅️ W"
-        # https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2b05.png
         if 292 <= b < 337: return "↖️ NW"
-        # https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2196.png
     except:
         pass
     return "❓"
 
-
 def get_bearing_icon_url(bearing):
     """Converts a degree bearing to an emoji arrow and cardinal direction."""
-    if pd.isna(bearing): return "❓ Unknown"
+    if pd.isna(bearing): return None
     try:
         b = int(bearing)
         if b >= 337 or b < 23:
             return {
-                "url":
-                "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2b06.png",
+                "url": "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2b06.png",
                 "width": 28,
                 "height": 28,
                 "anchorY": 28,
             }
         if 23 <= b < 67:
             return {
-                "url":
-                "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2197.png",
+                "url": "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2197.png",
                 "width": 28,
                 "height": 28,
                 "anchorY": 28,
             }
         if 67 <= b < 112:
             return {
-                "url":
-                "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/27a1.png",
+                "url": "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/27a1.png",
                 "width": 28,
                 "height": 28,
                 "anchorY": 28,
             }
         if 112 <= b < 157:
             return {
-                "url":
-                "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2198.png",
+                "url": "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2198.png",
                 "width": 28,
                 "height": 28,
                 "anchorY": 28,
             }
         if 157 <= b < 202:
             return {
-                "url":
-                "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2b07.png",
+                "url": "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2b07.png",
                 "width": 28,
                 "height": 28,
                 "anchorY": 28,
             }
         if 202 <= b < 247:
             return {
-                "url":
-                "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2199.png",
+                "url": "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2199.png",
                 "width": 28,
                 "height": 28,
                 "anchorY": 28,
             }
         if 247 <= b < 292:
             return {
-                "url":
-                "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2b05.png",
+                "url": "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2b05.png",
                 "width": 28,
                 "height": 28,
                 "anchorY": 28,
             }
         if 292 <= b < 337:
             return {
-                "url":
-                "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2196.png",
+                "url": "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2196.png",
                 "width": 28,
                 "height": 28,
                 "anchorY": 28,
             }
     except:
         pass
-
+    return None
 
 # --- Data Management Helpers (Local Cache) ---
-
-
 def get_local_file_path(filename):
     """Returns path to data/{today}/{filename}, creating dir if needed."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -229,20 +219,17 @@ def get_local_file_path(filename):
     os.makedirs(folder_path, exist_ok=True)
     return os.path.join(folder_path, filename)
 
-
 def fetch_all_routes_today():
     """Fetches ALL active routes for the current day using limit=-1."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     params = {"date_from": today, "date_to": today, "limit": -1}
     return fetch_api("gtfs_routes/list", params)
 
-
 def fetch_all_stops_today():
     """Fetches ALL active stops for the current day using limit=-1."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     params = {"date_from": today, "date_to": today, "limit": -1}
     return fetch_api("gtfs_stops/list", params)
-
 
 def get_or_fetch_routes():
     """Checks local disk for routes.json; otherwise fetches and saves."""
@@ -261,7 +248,6 @@ def get_or_fetch_routes():
 
     return [], "error", None
 
-
 def get_or_fetch_agencies():
     """Checks local disk for agencies.json; otherwise fetches and saves."""
     file_path = get_local_file_path("agencies.json")
@@ -278,7 +264,6 @@ def get_or_fetch_agencies():
         return data, "api", file_path
 
     return [], "error", None
-
 
 def get_or_fetch_stops():
     """Checks local disk for stops.json; otherwise fetches and saves."""
@@ -297,7 +282,6 @@ def get_or_fetch_stops():
 
     return [], "error", None
 
-
 def get_agency_lookup_local():
     """Returns a dict mapping operator_ref -> agency_name using local/cached data."""
     agencies, _, _ = get_or_fetch_agencies()
@@ -308,7 +292,6 @@ def get_agency_lookup_local():
         str(a['operator_ref']): a['agency_name']
         for a in agencies if a.get('operator_ref')
     }
-
 
 def get_master_routes_df():
     """
@@ -335,17 +318,17 @@ def get_master_routes_df():
 
     return df_routes
 
-
-@st.cache_data(ttl=60)
 def fetch_live_siri_data(lat, lon, radius_km, lookback_min=10):
     """
     Fetches real-time vehicle locations (SIRI) within a bounding box.
     """
     bbox = haversine_bbox(lat, lon, radius_km)
-
-    now = datetime.now(timezone.utc)
+    
+    # Use timezone-aware timestamps
+    israel_tz = pytz.timezone('Asia/Jerusalem')
+    now = datetime.now(israel_tz)
     from_time = now - timedelta(minutes=lookback_min)
-
+    
     params = {
         "recorded_at_time_from": from_time.isoformat(),
         "lat__greater_or_equal": bbox["min_lat"],
@@ -358,7 +341,6 @@ def fetch_live_siri_data(lat, lon, radius_km, lookback_min=10):
 
     return fetch_api("siri_vehicle_locations/list", params)
 
-
 def enrich_siri_data_with_local(siri_df, master_routes_df):
     """
     Enriches SIRI data using the pre-loaded Master Routes DataFrame.
@@ -367,28 +349,20 @@ def enrich_siri_data_with_local(siri_df, master_routes_df):
         return siri_df
 
     # 1. Build Lookups from Master Data
-
-    # A. Direct Route ID Lookup (Best Accuracy)
-    # Master Routes DF 'id' column corresponds to gtfs_route_id
     id_lookup = master_routes_df.set_index('id')[[
         'route_short_name', 'route_long_name', 'agency_name'
     ]].to_dict('index')
 
     # B. Fallback Line Ref Lookup (Generic)
-    # Use string conversion to ensure matches
     master_routes_df['line_ref_str'] = master_routes_df['line_ref'].astype(str)
-
-    # Sort by date descending to prioritize latest route info
     master_routes_df.sort_values(by='id', ascending=False, inplace=True)
-
-    # Drop duplicates to keep the LATEST/most relevant entry per line_ref for fallback
     unique_routes = master_routes_df.drop_duplicates(subset=['line_ref_str'])
     ref_lookup = unique_routes.set_index('line_ref_str')[[
         'route_short_name', 'route_long_name', 'agency_name', 'id'
     ]].to_dict('index')
 
     def apply_enrichment(row):
-        # 1. Try Specific GTFS Route ID (found in gtfs_ride__gtfs_route_id column)
+        # 1. Try Specific GTFS Route ID
         specific_route_id = row.get('gtfs_ride__gtfs_route_id')
         if specific_route_id and specific_route_id in id_lookup:
             info = id_lookup[specific_route_id]
@@ -397,8 +371,7 @@ def enrich_siri_data_with_local(siri_df, master_routes_df):
                 info['agency_name'], specific_route_id
             ])
 
-        # 2. Try SIRI Line Ref (siri_route__line_ref OR line_ref)
-        # Handle inconsistent column naming from API flattening
+        # 2. Try SIRI Line Ref
         ref = str(row.get('siri_route__line_ref') or row.get('line_ref'))
 
         if ref and ref in ref_lookup:
@@ -417,64 +390,44 @@ def enrich_siri_data_with_local(siri_df, master_routes_df):
 
     return siri_df
 
-
 def get_timetable_details(route_id):
     """
     Fetches the shape (path) and stops for a specific GTFS route ID.
-    NOTE: Still uses API because Geometry/Path is not in the bulk route list.
     """
-    # CRITICAL FIX: Ensure ID is strictly integer to avoid 422 errors with floats
     try:
         route_id = int(float(route_id))
     except (ValueError, TypeError):
         return None, f"Invalid Route ID: {route_id}"
 
-    # Step 1: Get the LATEST scheduled ride for this route ID
+    # Use Israel timezone for date ranges
+    israel_tz = pytz.timezone('Asia/Jerusalem')
+    
+    # Get today's date in Israel timezone
+    today = datetime.now(israel_tz).date()
+    
+    # Step 1: Get scheduled rides for today
     ride_params = {
+        "gtfs_route__date_from": today.isoformat(),
+        "gtfs_route__date_to": today.isoformat(),
         "gtfs_route_id": route_id,
-        "order_by": "start_time desc",
+        "order_by": "start_time asc",
         "limit": 1
     }
 
     rides = fetch_api("gtfs_rides/list", ride_params)
 
     if not rides:
-        return None, "No scheduled rides found."
+        return None, "No scheduled rides found for today."
 
     ride = rides[0]
     ride_id = ride['id']
-    r_start = ride.get('start_time')
-    r_end = ride.get('end_time')
-
+    
+    # Step 2: Get stops for this ride
     stops_params = {
-        "gtfs_ride_id": ride_id,
-        "gtfs_ride__gtfs_route_id": route_id,
+        "gtfs_ride_ids": str(ride_id),
         "order_by": "stop_sequence",
         "limit": 1000,
     }
-
-    now = datetime.now(timezone.utc)
-    fallback_start = now.replace(hour=0, minute=0, second=0).isoformat()
-    fallback_end = now.replace(hour=23, minute=59, second=59).isoformat()
-
-    if r_start:
-        try:
-            start_dt = datetime.fromisoformat(r_start.replace('Z', '+00:00'))
-            if r_end:
-                end_dt = datetime.fromisoformat(r_end.replace('Z', '+00:00'))
-            else:
-                end_dt = start_dt + timedelta(hours=24)
-
-            stops_params["arrival_time_from"] = (
-                start_dt - timedelta(minutes=30)).isoformat()
-            stops_params["arrival_time_to"] = (
-                end_dt + timedelta(minutes=30)).isoformat()
-        except Exception:
-            stops_params["arrival_time_from"] = r_start
-            stops_params["arrival_time_to"] = r_end or r_start
-    else:
-        stops_params["arrival_time_from"] = fallback_start
-        stops_params["arrival_time_to"] = fallback_end
 
     stops_data = fetch_api("gtfs_ride_stops/list", stops_params)
 
@@ -510,8 +463,196 @@ def get_timetable_details(route_id):
     final_stops.sort(key=lambda x: x['seq'])
     path_coords = [s['coordinates'] for s in final_stops]
 
-    return {"path": path_coords, "stops": final_stops}, None
+    return {"path": path_coords, "stops": final_stops, "ride_id": ride_id}, None
 
+def sanitize_siri_data(siri_df):
+    """Clean and validate SIRI data."""
+    if siri_df.empty:
+        return siri_df
+    
+    # Ensure required columns exist
+    required_cols = ['lat', 'lon']
+    for col in required_cols:
+        if col not in siri_df.columns:
+            siri_df[col] = None
+    
+    # Convert numeric columns
+    numeric_cols = ['lat', 'lon', 'bearing', 'velocity']
+    for col in numeric_cols:
+        if col in siri_df.columns:
+            siri_df[col] = pd.to_numeric(siri_df[col], errors='coerce')
+    
+    # Drop invalid rows
+    siri_df = siri_df.dropna(subset=['lat', 'lon'])
+    
+    # Filter out unrealistic coordinates
+    siri_df = siri_df[
+        (siri_df['lat'].between(29.0, 34.0)) &
+        (siri_df['lon'].between(34.0, 36.0))
+    ]
+    
+    # Remove duplicates
+    siri_df = siri_df.drop_duplicates(
+        subset=['siri_ride__vehicle_ref', 'recorded_at_time'], 
+        keep='last'
+    )
+    
+    return siri_df
+
+def create_map_layers(siri_df, live_paths, user_lat, user_lon, viz_path_width, viz_pin_radius):
+    """Create optimized map layers for better performance."""
+    layers = []
+    
+    # 1. Bus Location Layer (Optimized)
+    if not siri_df.empty:
+        # Filter out buses with invalid locations
+        valid_buses = siri_df.dropna(subset=['lat', 'lon']).copy()
+        
+        # Add icon data
+        valid_buses['icon_data'] = valid_buses['bearing'].apply(get_bearing_icon_url)
+        
+        # Create Icon Layer
+        layers.append(
+            pdk.Layer(
+                "IconLayer",
+                data=valid_buses.to_dict('records'),
+                get_icon="icon_data",
+                get_size=4,
+                size_scale=5,
+                get_position='[lon, lat]',
+                pickable=True,
+            )
+        )
+    
+    # 2. Route Paths Layer (Only if needed)
+    if live_paths and len(live_paths) <= 50:
+        path_layer_data = []
+        for path_info in live_paths[:50]:
+            if len(path_info.get('path', [])) >= 2:
+                path_layer_data.append({
+                    "path": path_info['path'],
+                    "color": path_info.get('color', [0, 255, 0])
+                })
+        
+        if path_layer_data:
+            layers.append(
+                pdk.Layer(
+                    "PathLayer",
+                    data=path_layer_data,
+                    get_path="path",
+                    get_width=viz_path_width,
+                    get_color="color",
+                    width_min_pixels=2,
+                    pickable=False
+                )
+            )
+    
+    # 3. User Location
+    layers.append(
+        pdk.Layer(
+            "ScatterplotLayer",
+            data=[{"lat": user_lat, "lon": user_lon}],
+            get_position='[lon, lat]',
+            get_radius=viz_pin_radius,
+            get_fill_color=[255, 0, 0, 180],
+            stroked=True,
+            get_line_color=[255, 255, 255],
+            get_line_width=2,
+        )
+    )
+    
+    return layers
+
+def draw_route_paths(route_ids):
+    """Draw multiple route paths with error handling."""
+    all_paths = []
+    all_stops = []
+    errors = []
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for i, r_id in enumerate(route_ids):
+        status_text.text(f"Fetching route {i+1}/{len(route_ids)} (ID: {r_id})...")
+        
+        try:
+            data, err = get_timetable_details(r_id)
+            if err:
+                errors.append(f"Route {r_id}: {err}")
+            elif data:
+                if data.get('path'):
+                    all_paths.append({
+                        "path": data['path'],
+                        "color": get_distinct_color(i)
+                    })
+                if data.get('stops'):
+                    for s in data['stops']:
+                        s['color'] = get_distinct_color(i)
+                    all_stops.extend(data['stops'])
+        except Exception as e:
+            errors.append(f"Route {r_id}: {str(e)}")
+        
+        progress_bar.progress((i + 1) / len(route_ids))
+    
+    progress_bar.empty()
+    status_text.empty()
+    
+    # Show errors if any
+    if errors:
+        with st.expander("⚠️ Some routes had issues", expanded=False):
+            for error in errors[:5]:
+                st.error(error)
+    
+    return all_paths, all_stops
+
+def check_api_health():
+    """Check if the API is available and responsive."""
+    try:
+        response = requests.get(f"{API_BASE_URL}/gtfs_routes/list", 
+                               params={"limit": 1}, 
+                               timeout=10)
+        return response.status_code == 200
+    except:
+        return False
+
+def optimize_dataframe_operations(df):
+    """Optimize DataFrame for memory and performance."""
+    if df.empty:
+        return df
+    
+    # Downcast numeric columns
+    for col in df.select_dtypes(include=['int64']).columns:
+        df[col] = pd.to_numeric(df[col], downcast='integer')
+    
+    for col in df.select_dtypes(include=['float64']).columns:
+        df[col] = pd.to_numeric(df[col], downcast='float')
+    
+    # Convert object columns to categorical where appropriate
+    for col in df.select_dtypes(include=['object']).columns:
+        if df[col].nunique() / len(df) < 0.5:
+            df[col] = df[col].astype('category')
+    
+    return df
+
+@st.cache_data(ttl=3600)
+def get_filtered_routes(search_mode, search_query=None, selected_agency=None):
+    """Cache filtered routes to improve performance."""
+    df_routes = get_master_routes_df()
+    
+    if df_routes.empty:
+        return pd.DataFrame()
+    
+    if search_mode == "Search by Line Number" and search_query:
+        filtered = df_routes[
+            (df_routes['route_short_name'] == search_query) |
+            (df_routes['route_long_name'].str.contains(search_query, case=False, na=False))
+        ]
+    elif search_mode == "Browse by Operator" and selected_agency:
+        filtered = df_routes[df_routes['agency_name'] == selected_agency]
+    else:
+        filtered = pd.DataFrame()
+    
+    return filtered
 
 # --- Sidebar Controls ---
 with st.sidebar:
@@ -519,26 +660,24 @@ with st.sidebar:
 
     app_mode = st.radio("Select Mode", [
         "📡 Live Traffic (SIRI)", "🗺️ Route Explorer", "💾 Bulk Data Manager",
-        "🔍 API Data Explorer", "urbanaccess plotting thing"
+        "🔍 API Data Explorer"
     ])
 
     st.divider()
 
-    # --- VISUALIZATION SETTINGS (Added per request) ---
+    # --- VISUALIZATION SETTINGS ---
     with st.expander("🎨 Visualization Settings", expanded=False):
         viz_dot_radius = st.slider("Dot Radius (Meters)", 10, 500, 50)
         viz_path_width = st.slider("Path Width (Meters)", 5, 200, 30)
         viz_arrow_size = st.slider("Arrow Size", 10, 100, 45)
         viz_elevation_scale = st.slider("3D Speed Scale", 0, 50, 10)
         viz_pin_radius = st.slider("User Pin Radius", 50, 1000, 150)
-        # Added per request: Max limit slider
         viz_max_paths = st.slider(
             "Max Live Paths Limit",
             10,
             500,
             50,
-            help=
-            "How many route lines to draw simultaneously in Live Mode without filtering."
+            help="How many route lines to draw simultaneously in Live Mode."
         )
 
     # Debug Toggle
@@ -584,10 +723,14 @@ with st.sidebar:
     st.info("Data provided by Open Bus Stride API (Hasadna)")
 
 # --- Main App Logic ---
-
 st.title("🚌 Stride Ultimate Explorer")
 
-# --- Load Master Data Once (Used for Live & Explorer) ---
+# API Health Check
+if not check_api_health():
+    st.error("⚠️ Open Bus API is currently unavailable or slow. Some features may not work properly.")
+    st.info("You can still use cached data or try again later.")
+
+# --- Load Master Data Once ---
 if app_mode in ["📡 Live Traffic (SIRI)", "🗺️ Route Explorer"]:
     if 'master_routes' not in st.session_state or st.session_state[
             'master_routes'].empty:
@@ -609,13 +752,11 @@ if app_mode == "📡 Live Traffic (SIRI)":
     with st.spinner("Ping satellites... fetching SIRI data..."):
         raw_siri = fetch_live_siri_data(user_lat, user_lon, radius, lookback)
 
-    #  st.write(raw_siri)
-    #   st.dataframe(raw_siri)
-
     if raw_siri:
         siri_df = pd.DataFrame(raw_siri)
+        siri_df = sanitize_siri_data(siri_df)
 
-        # Enrich Data using MASTER DataFrame (Joined Lookup)
+        # Enrich Data using MASTER DataFrame
         if not st.session_state['master_routes'].empty:
             siri_df = enrich_siri_data_with_local(
                 siri_df, st.session_state['master_routes'])
@@ -629,12 +770,8 @@ if app_mode == "📡 Live Traffic (SIRI)":
             siri_df['compass_direction'] = "?"
             siri_df['bearing_angle'] = 0
 
-        # Calculate Z-height for arrows to sit ON TOP of 3D columns
-        # Base height increased + Scale
+        # Calculate Z-height for arrows
         siri_df['z_height'] = 200 + (siri_df['velocity'].fillna(0) * 10)
-
-        # Clean data
-        siri_df = siri_df.dropna(subset=['lat', 'lon'])
 
         # Date Conversion
         if 'recorded_at_time' in siri_df.columns:
@@ -646,14 +783,15 @@ if app_mode == "📡 Live Traffic (SIRI)":
         m1.metric("Active Buses", len(siri_df))
         m2.metric(
             "Avg Speed", f"{siri_df['velocity'].mean():.1f} km/h"
-            if 'velocity' in siri_df else "N/A")
+            if 'velocity' in siri_df and not siri_df['velocity'].isnull().all() else "N/A")
         m3.metric(
             "Max Speed", f"{siri_df['velocity'].max():.1f} km/h"
-            if 'velocity' in siri_df else "N/A")
+            if 'velocity' in siri_df and not siri_df['velocity'].isnull().all() else "N/A")
         m4.metric(label="Last Update",
                   value=(datetime.now() +
                          timedelta(hours=2)).strftime("%H:%M:%S"),
                   delta="Live Data")
+        
         st.markdown("### 🚦 Traffic Control")
 
         available_lines = sorted(
@@ -673,13 +811,10 @@ if app_mode == "📡 Live Traffic (SIRI)":
         route_ids_to_draw = []
 
         if selected_lines:
-            # User selected specific lines
             siri_df = siri_df[siri_df['route_short_name'].astype(str).isin(
                 selected_lines)]
-            route_ids_to_draw = siri_df['gtfs_route_id'].dropna().unique(
-            ).tolist()
+            route_ids_to_draw = siri_df['gtfs_route_id'].dropna().unique().tolist()
         elif show_paths:
-            # UPDATED LOGIC: Use slider limit (viz_max_paths)
             unique_routes = siri_df['gtfs_route_id'].dropna().unique().tolist()
             route_ids_to_draw = unique_routes[:viz_max_paths]
 
@@ -700,97 +835,12 @@ if app_mode == "📡 Live Traffic (SIRI)":
                             "color": get_distinct_color(i)
                         })
 
-        # Map Layers
-        base_arrow_size = 20
-        speed_multiplier = 0.8
-        siri_df = siri_df.drop_duplicates(subset=['siri_ride__vehicle_ref'])
+        # Create Map Layers
+        layers = create_map_layers(siri_df, live_paths, user_lat, user_lon, viz_path_width, viz_pin_radius)
 
-        # siri_df['lon'] = pd.to_numeric(siri_df['lon'], errors='coerce')
-        # siri_df['lat'] = pd.to_numeric(siri_df['lat'], errors='coerce')
-        # siri_df['velocity'] = pd.to_numeric(siri_df['velocity'], errors='coerce').fillna(0)
-        # siri_df['bearing_angle'] = pd.to_numeric(siri_df['bearing_angle'], errors='coerce').fillna(0)
-
-        # # Drop rows with bad coordinates or they will break the whole layer
-        # siri_df = siri_df.dropna(subset=['lat', 'lon'])
-
-        layers = []
-        siri_df['lon'] = siri_df['lon'].astype(float)
-        siri_df['lat'] = siri_df['lat'].astype(float)
-        # --- 2. The Bus Icon Layer ---
-        # Instead of an emoji string, we use the Unicode Hex for a bus (U+1F68C)
-        # which is often more stable in cross-platform rendering.
-        ICON_URL = "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f68d.png"
-
-        icon_data = {
-            "url": ICON_URL,
-            "width": 28,
-            "height": 28,
-            "anchorY": 28,
-        }
-
-        # 2. Add the icon data to your dataframe
-        siri_df["icon_data"] = [icon_data for _ in range(len(siri_df))]
-        siri_df["diction_icon_layer"] = siri_df['bearing'].apply(
-            get_bearing_icon_url)
-
-        layers.append(
-            pdk.Layer(
-                type="IconLayer",
-                data=siri_df,
-                get_icon="diction_icon_layer",
-                get_size=4,
-                size_scale=5,  # Adjust this to make icons bigger/smaller
-                get_position='[lon, lat]',
-                pickable=True,
-            ))
-        if live_paths:
-
-            st.write('live paths')
-
-            layers.append(
-                pdk.Layer("PathLayer",
-                          data=live_paths,
-                          get_path="path",
-                          get_width=viz_path_width,
-                          get_color="color",
-                          width_min_pixels=3,
-                          pickable=False))
-
-        # --- 3. The Direction Arrow Layer ---
-        layers.append(
-            pdk.Layer(
-                "TextLayer",
-                data=siri_df,
-                get_position='[lon, lat]',
-                get_text="ARROW",  # A very stable Unicode arrow
-                # We use a f-string inside the pydeck engine for dynamic sizing
-                get_size="20 + (velocity * 1.5)",
-                get_color=[255, 215, 0],  # Gold color
-                get_angle="bearing_angle",
-                billboard=True,
-            ))
-
-        # --- 4. User Location (Scatterplot) ---
-        layers.append(
-            pdk.Layer(
-                "ScatterplotLayer",
-                data=pd.DataFrame([{
-                    "lat": user_lat,
-                    "lon": user_lon
-                }]),
-                get_position='[lon, lat]',
-                get_radius=100,
-                get_fill_color=[255, 0, 0, 200],
-                stroked=True,
-                get_line_color=[255, 255, 255],
-                get_line_width=2,
-            ))
-
-        # --- 5. Final Map Output ---
+        # Final Map Output
         st.pydeck_chart(
             pdk.Deck(
-                # We use map_style=None to let Streamlit's built-in
-                # (Carto-based) OSM take over. This is the most stable way.
                 map_style=None,
                 initial_view_state=pdk.ViewState(latitude=user_lat,
                                                  longitude=user_lon,
@@ -813,13 +863,14 @@ if app_mode == "📡 Live Traffic (SIRI)":
                         "zIndex": 1000
                     }
                 }))
+        
         st.caption(
             "🔴 Red Pin = Your Search Location | 🚌 = Bus Location | ➤ = Direction | 🟩 Green Line = Route Path"
         )
 
         st.subheader("📊 Live Fleet Monitor")
 
-        display_df = siri_df.copy()
+        display_df = optimize_dataframe_operations(siri_df.copy())
 
         priority_cols = [
             'route_short_name', 'agency_name', 'velocity', 'compass_direction',
@@ -874,7 +925,6 @@ elif app_mode == "🗺️ Route Explorer":
     st.markdown("### 🗺️ Unified Route Explorer")
     st.info("Explore planned routes by Line Number OR Operator.")
 
-    # Unified DataFrame
     df_routes = st.session_state.get('master_routes', pd.DataFrame())
 
     if df_routes.empty:
@@ -882,7 +932,6 @@ elif app_mode == "🗺️ Route Explorer":
             "No route data found. Please go to 'Bulk Data Manager' and click 'Update Routes'."
         )
     else:
-        # Search Mode Toggle
         search_mode = st.radio("Search Method",
                                ["Search by Line Number", "Browse by Operator"],
                                horizontal=True)
@@ -893,14 +942,9 @@ elif app_mode == "🗺️ Route Explorer":
             search_query = st.text_input("Enter Line Number (e.g. 480, 5)",
                                          placeholder="Type line number...")
             if search_query:
-                # Exact match on short name or partial on long name
-                filtered_routes = df_routes[
-                    (df_routes['route_short_name'] == search_query) |
-                    (df_routes['route_long_name'].str.
-                     contains(search_query, case=False, na=False))]
+                filtered_routes = get_filtered_routes(search_mode, search_query)
 
         elif search_mode == "Browse by Operator":
-            # Operator Filter
             valid_agencies = sorted([
                 a for a in df_routes['agency_name'].unique()
                 if a and isinstance(a, str)
@@ -909,17 +953,14 @@ elif app_mode == "🗺️ Route Explorer":
                                            options=valid_agencies)
 
             if selected_agency:
-                filtered_routes = df_routes[df_routes['agency_name'] ==
-                                            selected_agency]
+                filtered_routes = get_filtered_routes(search_mode, None, selected_agency)
 
         # Display & Select Routes
         if not filtered_routes.empty:
             st.success(f"Found {len(filtered_routes)} routes.")
 
-            # Show Table for Operator View (Corrected columns)
             if search_mode == "Browse by Operator":
                 with st.expander("📋 View Route Table", expanded=True):
-                    # Ensure columns exist before selecting
                     cols_to_show = [
                         'route_short_name', 'agency_name', 'route_long_name',
                         'id'
@@ -930,7 +971,6 @@ elif app_mode == "🗺️ Route Explorer":
                     st.dataframe(filtered_routes[valid_cols],
                                  use_container_width=True)
 
-            # Create friendly display names for the multiselect
             filtered_routes['display_name'] = filtered_routes.apply(
                 lambda x:
                 f"Line {x['route_short_name']} | {x['route_long_name']} (ID: {x['id']})",
@@ -941,35 +981,12 @@ elif app_mode == "🗺️ Route Explorer":
                 options=filtered_routes['display_name'].tolist())
 
             if st.button("Draw Selected Routes") and selected_route_keys:
-                all_paths = []
-                all_stops = []
-
-                progress_bar = st.progress(0)
-
-                # Get selected IDs
                 selected_ids = filtered_routes[filtered_routes[
                     'display_name'].isin(selected_route_keys)]['id'].tolist()
-
-                for i, r_id in enumerate(selected_ids):
-                    color = get_distinct_color(i)
-
-                    data, err = get_timetable_details(r_id)
-                    if data:
-                        if data.get('path'):
-                            all_paths.append({
-                                "path": data['path'],
-                                "color": color
-                            })
-                        if data.get('stops'):
-                            # Add color to stops
-                            for s in data['stops']:
-                                s['color'] = color
-                            all_stops.extend(data['stops'])
-
-                    progress_bar.progress((i + 1) / len(selected_ids))
+                
+                all_paths, all_stops = draw_route_paths(selected_ids)
 
                 if all_stops:
-                    # Layers
                     path_layer = pdk.Layer("PathLayer",
                                            data=all_paths,
                                            get_path="path",
@@ -983,7 +1000,6 @@ elif app_mode == "🗺️ Route Explorer":
                                             get_radius=viz_dot_radius * 2,
                                             pickable=True)
 
-                    # Center Map
                     start_pos = all_stops[0]['coordinates']
                     view_state = pdk.ViewState(latitude=start_pos[1],
                                                longitude=start_pos[0],
@@ -996,15 +1012,13 @@ elif app_mode == "🗺️ Route Explorer":
                                  tooltip={
                                      "html": """
                                      <div style="font-family: sans-serif; padding: 5px;">
-                                         <b>Line:</b> {route_short_name}<br/>
-                                         <b>Destination:</b> {route_long_name}<br/>
-                                         <b>Speed:</b> {velocity} km/h<br/>
-                                         <b>Bearing:</b> {bearing}°
+                                         <b>Stop:</b> {name}<br/>
+                                         <b>Code:</b> {code}<br/>
+                                         <b>Sequence:</b> {seq}
                                      </div>
                                  """,
                                      "style": {
-                                         "backgroundColor":
-                                         "rgba(0, 50, 100, 0.8)",
+                                         "backgroundColor": "rgba(0, 50, 100, 0.8)",
                                          "color": "white",
                                          "fontSize": "14px",
                                          "zIndex": 1000
@@ -1026,9 +1040,6 @@ elif app_mode == "💾 Bulk Data Manager":
         if st.button("📥 Update Routes (Today)"):
             with st.spinner("Updating route cache..."):
                 start_time = time.time()
-                data, source, path = get_or_fetch_routes(
-                )  # This refreshes if file exists but user clicked update? logic currently checks file first.
-                # Force update logic needed here really, but for now simple fetch
                 data = fetch_all_routes_today()
                 if data:
                     path = get_local_file_path("routes.json")
@@ -1036,7 +1047,6 @@ elif app_mode == "💾 Bulk Data Manager":
                         json.dump(data, f, ensure_ascii=False, indent=2)
                     elapsed = time.time() - start_time
                     st.success(f"Fetched {len(data)} routes in {elapsed:.2f}s")
-                    # Force reload master df
                     if 'master_routes' in st.session_state:
                         del st.session_state['master_routes']
 
@@ -1056,7 +1066,7 @@ elif app_mode == "💾 Bulk Data Manager":
         if st.button("📥 Update Agencies"):
             with st.spinner("Updating agency cache..."):
                 start_time = time.time()
-                data = fetch_api("gtfs_agencies/list", {"limit": 1000})
+                data = fetch_api("gtfs_agencies/list", {"limit": -1})
                 if data:
                     path = get_local_file_path("agencies.json")
                     with open(path, 'w', encoding='utf-8') as f:
@@ -1084,11 +1094,9 @@ elif app_mode == "🔍 API Data Explorer":
         ["🏢 Operators", "🚌 Route Catalog", "🛠️ Raw Query"])
 
     with tab1:
-        # Use local cache for display
         agencies, _, _ = get_or_fetch_agencies()
         if agencies:
             df = pd.DataFrame(agencies)
-            # FIX: Only select columns that actually exist to prevent KeyError
             desired_cols = ['agency_name', 'operator_ref', 'id']
             existing_cols = [c for c in desired_cols if c in df.columns]
             st.dataframe(df[existing_cols], use_container_width=True)
@@ -1096,7 +1104,6 @@ elif app_mode == "🔍 API Data Explorer":
             st.warning("No agencies found.")
 
     with tab2:
-        # Use local cache for search
         routes, _, _ = get_or_fetch_routes()
         if routes:
             df_routes = pd.DataFrame(routes)
