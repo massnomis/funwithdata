@@ -1,0 +1,9 @@
+streamlit>=1.36
+pandas>=2.1
+numpy>=1.26
+requests>=2.31
+urllib3>=2.0
+pydeck>=0.9
+pytz>=2024.1
+networkx>=3.2
+matplotlib>=3.8
